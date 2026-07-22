@@ -186,39 +186,40 @@ with tab1:
         st.dataframe(pd.DataFrame(dt_stats).set_index("列名"), width="stretch")
 
     st.subheader("数据清洗建议")
-    cleaning_key = f"cleaning_{uploaded.name}_{info['rows']}"
-    if col_btn.button("🔄", key="refresh_cleaning", help="重新生成清洗建议"):
-        st.session_state.pop("cleaning_cache_key", None)
-        st.session_state.pop("cleaning_text", None)
 
-    if st.session_state.get("cleaning_cache_key") != cleaning_key:
-        cleaning_ctx = stat_analyzer.build_cleaning_context(df, info)
-        cleaning_prompt = (
-            "以下是一份数据集的质量摘要：\n" + cleaning_ctx +
-            "\n\n请根据上述信息，给出简洁的数据清洗建议。"
-            "只针对实际存在的问题给出建议，没有问题的项不要提及。"
-            "用简短的分点列表呈现，每条建议说明问题是什么、建议如何处理。"
-        )
-        with st.spinner("生成数据清洗建议..."):
-            try:
-                client = ai_interpreter._get_client()
-                import config as _cfg
-                msg = client.messages.create(
-                    model=_cfg.ANTHROPIC_MODEL,
-                    max_tokens=400,
-                    messages=[{"role": "user", "content": cleaning_prompt}],
-                )
-                st.session_state["cleaning_text"] = msg.content[0].text
-                st.session_state["cleaning_cache_key"] = cleaning_key
-            except Exception:
-                st.session_state["cleaning_text"] = ""
-                st.session_state["cleaning_cache_key"] = cleaning_key
+    issues = stat_analyzer.detect_issues(df, info)
 
-    cleaning_text = st.session_state.get("cleaning_text", "")
-    if cleaning_text:
-        st.markdown(cleaning_text)
+    if not issues:
+        st.success("未检测到数据质量问题，数据状态良好。")
     else:
-        st.caption("未发现明显数据质量问题。")
+        # 重复行
+        if "duplicates" in issues:
+            n = issues["duplicates"]["count"]
+            with st.expander(f"⚠️ 重复行：共 {n} 行", expanded=True):
+                dup_rows = df[df.duplicated(keep=False)]
+                st.caption("以下为所有重复记录（含首次出现）：")
+                st.dataframe(dup_rows, width="stretch")
+
+        # 缺失值
+        if "missing" in issues:
+            for col, meta in issues["missing"].items():
+                with st.expander(f"⚠️ 缺失值：「{col}」缺失 {meta['count']} 行（{meta['pct']}%）", expanded=True):
+                    miss_rows = df[df[col].isnull()]
+                    st.caption(f"以下 {len(miss_rows)} 行的「{col}」字段为空：")
+                    st.dataframe(miss_rows, width="stretch")
+
+        # 异常值
+        if "outliers" in issues:
+            for col, meta in issues["outliers"].items():
+                with st.expander(
+                    f"⚠️ 异常值：「{col}」有 {meta['count']} 个异常值，正常范围 [{meta['lower']:.2f}, {meta['upper']:.2f}]",
+                    expanded=True,
+                ):
+                    out_rows = df[(df[col] < meta["lower"]) | (df[col] > meta["upper"])]
+                    st.caption(f"以下 {len(out_rows)} 行的「{col}」超出正常范围：")
+                    st.dataframe(out_rows, width="stretch")
+
+        st.caption("💡 前往「🧹 数据清洗」Tab 可对以上问题一键处理并下载清洗后数据。")
 
 # ══ Tab2：可视化分析 ════════════════════════════════════════
 with tab2:
