@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+数据分析Agent/__pycache__/
+数据分析Agent/.streamlit/

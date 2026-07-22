@@ -1,0 +1,9 @@
+anthropic
+pandas
+plotly
+fpdf2
+openpyxl
+python-dotenv
+streamlit
+requests
+beautifulsoup4
