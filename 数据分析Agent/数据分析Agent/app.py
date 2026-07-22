@@ -187,7 +187,19 @@ with tab1:
 
     st.subheader("数据清洗建议")
 
-    issues = stat_analyzer.detect_issues(df, info)
+    _group_options = ["不分组"] + [c for c in info["cat_cols"] if df[c].nunique() <= 30]
+    _group_col_tab1 = None
+    if len(_group_options) > 1:
+        _sel = st.selectbox(
+            "异常值检测分组依据",
+            _group_options,
+            help="选择分类列后，异常值在每个分类内部单独判断，避免不同类别间的正常价差被误报为异常",
+            key="tab1_outlier_group",
+        )
+        if _sel != "不分组":
+            _group_col_tab1 = _sel
+
+    issues = stat_analyzer.detect_issues(df, info, group_col=_group_col_tab1)
 
     if not issues:
         st.success("未检测到数据质量问题，数据状态良好。")
@@ -211,12 +223,17 @@ with tab1:
         # 异常值
         if "outliers" in issues:
             for col, meta in issues["outliers"].items():
-                with st.expander(
-                    f"⚠️ 异常值：「{col}」有 {meta['count']} 个异常值，正常范围 [{meta['lower']:.2f}, {meta['upper']:.2f}]",
-                    expanded=True,
-                ):
-                    out_rows = df[(df[col] < meta["lower"]) | (df[col] > meta["upper"])]
-                    st.caption(f"以下 {len(out_rows)} 行的「{col}」超出正常范围：")
+                mask = meta["mask"]
+                out_rows = df[mask]
+                if _group_col_tab1:
+                    title = f"⚠️ 异常值：「{col}」有 {meta['count']} 个（按「{_group_col_tab1}」分组检测）"
+                    caption = f"以下 {len(out_rows)} 行的「{col}」在其所属分类内属于异常值："
+                else:
+                    lower, upper = meta["lower"], meta["upper"]
+                    title = f"⚠️ 异常值：「{col}」有 {meta['count']} 个，正常范围 [{lower:.2f}, {upper:.2f}]"
+                    caption = f"以下 {len(out_rows)} 行的「{col}」超出正常范围："
+                with st.expander(title, expanded=True):
+                    st.caption(caption)
                     st.dataframe(out_rows, width="stretch")
 
         st.caption("💡 前往「🧹 数据清洗」Tab 可对以上问题一键处理并下载清洗后数据。")
@@ -723,12 +740,24 @@ with tab5:
     st.subheader("数据清洗")
     st.caption("根据检测到的数据质量问题，选择处理方式，一键应用并下载清洗后的数据。")
 
-    issues = stat_analyzer.detect_issues(df, info)
+    _group_options5 = ["不分组"] + [c for c in info["cat_cols"] if df[c].nunique() <= 30]
+    _group_col_tab5 = None
+    if len(_group_options5) > 1:
+        _sel5 = st.selectbox(
+            "异常值检测分组依据",
+            _group_options5,
+            help="选择分类列后，异常值在每个分类内部单独判断，避免不同类别间的正常价差被误报为异常",
+            key="tab5_outlier_group",
+        )
+        if _sel5 != "不分组":
+            _group_col_tab5 = _sel5
+
+    issues = stat_analyzer.detect_issues(df, info, group_col=_group_col_tab5)
 
     if not issues:
         st.success("未检测到数据质量问题，数据状态良好。")
     else:
-        actions = {"missing": {}, "outliers": {}}
+        actions = {"missing": {}, "outliers": {}, "_outlier_meta": {}}
 
         # ── 重复行 ──────────────────────────────────────────
         if "duplicates" in issues:
@@ -777,11 +806,15 @@ with tab5:
 
         # ── 异常值 ──────────────────────────────────────────
         if "outliers" in issues:
-            st.markdown("#### 异常值（IQR 方法）")
+            st.markdown(f"#### 异常值（IQR 方法{'，按「' + _group_col_tab5 + '」分组' if _group_col_tab5 else ''}）")
             for col, meta in issues["outliers"].items():
-                st.markdown(
-                    f"**{col}**：{meta['count']} 个异常值，正常范围 [{meta['lower']:.2f}, {meta['upper']:.2f}]"
-                )
+                actions["_outlier_meta"][col] = meta
+                if _group_col_tab5:
+                    st.markdown(f"**{col}**：{meta['count']} 个异常值（各分类内部独立判断）")
+                else:
+                    st.markdown(
+                        f"**{col}**：{meta['count']} 个异常值，正常范围 [{meta['lower']:.2f}, {meta['upper']:.2f}]"
+                    )
                 action = st.radio(
                     "处理方式",
                     ["clip", "drop_row", "keep"],

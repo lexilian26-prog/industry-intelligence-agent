@@ -65,8 +65,10 @@ def build_stat_summary(df, info):
     return text
 
 
-def detect_issues(df, info):
-    """结构化检测数据质量问题，供清洗 Tab 使用"""
+def detect_issues(df, info, group_col=None):
+    """结构化检测数据质量问题，供清洗 Tab 使用。
+    group_col: 按该列分组后分别检测异常值，避免不同类别价差被误报。
+    """
     issues = {}
 
     dupes = int(df.duplicated().sum())
@@ -82,17 +84,49 @@ def detect_issues(df, info):
 
     outliers = {}
     for col in info["numeric_cols"]:
-        series = df[col].dropna()
-        if len(series) == 0:
-            continue
-        q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
-        iqr = q3 - q1
-        if iqr == 0:
-            continue
-        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        n_out = int(((series < lower) | (series > upper)).sum())
-        if n_out > 0:
-            outliers[col] = {"count": n_out, "lower": lower, "upper": upper}
+        if group_col and group_col in df.columns and group_col != col:
+            # 按分组分别计算 IQR，每组内判断异常值
+            outlier_mask = pd.Series(False, index=df.index)
+            bounds_per_group = {}
+            for grp, grp_df in df.groupby(group_col):
+                series = grp_df[col].dropna()
+                if len(series) < 4:
+                    continue
+                q1 = float(series.quantile(0.25))
+                q3 = float(series.quantile(0.75))
+                iqr = q3 - q1
+                if iqr == 0:
+                    continue
+                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                mask = (grp_df[col] < lower) | (grp_df[col] > upper)
+                outlier_mask.loc[grp_df.index] = outlier_mask.loc[grp_df.index] | mask
+                bounds_per_group[str(grp)] = {"lower": round(lower, 2), "upper": round(upper, 2)}
+            n_out = int(outlier_mask.sum())
+            if n_out > 0:
+                outliers[col] = {
+                    "count": n_out,
+                    "mask": outlier_mask,
+                    "group_col": group_col,
+                    "bounds_per_group": bounds_per_group,
+                }
+        else:
+            series = df[col].dropna()
+            if len(series) == 0:
+                continue
+            q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
+            iqr = q3 - q1
+            if iqr == 0:
+                continue
+            lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            mask = (df[col] < lower) | (df[col] > upper)
+            n_out = int(mask.sum())
+            if n_out > 0:
+                outliers[col] = {
+                    "count": n_out,
+                    "mask": mask,
+                    "lower": lower,
+                    "upper": upper,
+                }
     if outliers:
         issues["outliers"] = outliers
 
@@ -140,18 +174,38 @@ def apply_cleaning(df, info, actions):
     for col, action in actions.get("outliers", {}).items():
         if col not in df.columns or action == "keep":
             continue
-        series = df[col].dropna()
-        q1 = float(series.quantile(0.25))
-        q3 = float(series.quantile(0.75))
-        iqr = q3 - q1
-        if iqr == 0:
-            continue
-        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        mask = (df[col] < lower) | (df[col] > upper)
+        meta = actions.get("_outlier_meta", {}).get(col, {})
+        mask = meta.get("mask")
+        if mask is None:
+            # 无分组时退回全局 IQR
+            series = df[col].dropna()
+            q1 = float(series.quantile(0.25))
+            q3 = float(series.quantile(0.75))
+            iqr = q3 - q1
+            if iqr == 0:
+                continue
+            lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            mask = (df[col] < lower) | (df[col] > upper)
+        # 对齐索引（apply 过程中行可能已被删除）
+        mask = mask.reindex(df.index, fill_value=False)
         n_out = int(mask.sum())
+        if n_out == 0:
+            continue
         if action == "clip":
-            df[col] = df[col].clip(lower=lower, upper=upper)
-            log.append(f"「{col}」将 {n_out} 个异常值截断至 [{lower:.2f}, {upper:.2f}]")
+            # 按组截断或全局截断
+            if meta.get("group_col") and meta.get("bounds_per_group"):
+                group_col = meta["group_col"]
+                for grp, bounds in meta["bounds_per_group"].items():
+                    grp_idx = df[df[group_col].astype(str) == grp].index
+                    df.loc[grp_idx, col] = df.loc[grp_idx, col].clip(
+                        lower=bounds["lower"], upper=bounds["upper"]
+                    )
+                log.append(f"「{col}」按「{group_col}」分组截断异常值（{n_out} 个）")
+            else:
+                lower = meta.get("lower", df[col].min())
+                upper = meta.get("upper", df[col].max())
+                df[col] = df[col].clip(lower=lower, upper=upper)
+                log.append(f"「{col}」将 {n_out} 个异常值截断至 [{lower:.2f}, {upper:.2f}]")
         elif action == "drop_row":
             df = df[~mask]
             log.append(f"「{col}」删除含异常值的行（{n_out} 行）")
