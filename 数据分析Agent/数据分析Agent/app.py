@@ -91,7 +91,7 @@ with st.sidebar:
         st.caption(f"含缺失值列：{list(info['missing'].keys())}")
 
 # ── Tab 布局 ───────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📋 数据预览", "📈 可视化分析", "🤖 AI 解读", "📄 导出报告"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 数据预览", "📈 可视化分析", "🤖 AI 解读", "📄 导出报告", "🧹 数据清洗"])
 
 # ══ Tab1：数据预览 ══════════════════════════════════════════
 with tab1:
@@ -716,3 +716,114 @@ with tab4:
                         st.success("Word 文档已生成，点击上方按钮下载。")
                     except Exception as e:
                         st.error(f"Word 生成失败：{e}")
+
+# ══ Tab5：数据清洗 ══════════════════════════════════════════
+with tab5:
+    st.subheader("数据清洗")
+    st.caption("根据检测到的数据质量问题，选择处理方式，一键应用并下载清洗后的数据。")
+
+    issues = stat_analyzer.detect_issues(df, info)
+
+    if not issues:
+        st.success("未检测到数据质量问题，数据状态良好。")
+    else:
+        actions = {"missing": {}, "outliers": {}}
+
+        # ── 重复行 ──────────────────────────────────────────
+        if "duplicates" in issues:
+            n = issues["duplicates"]["count"]
+            st.markdown(f"#### 重复行（{n} 行）")
+            dup_action = st.radio(
+                "处理方式",
+                ["drop", "keep"],
+                format_func=lambda x: "删除重复行，保留首次出现" if x == "drop" else "保留不处理",
+                horizontal=True,
+                key="dup_action",
+            )
+            actions["duplicates"] = dup_action
+            st.divider()
+
+        # ── 缺失值 ──────────────────────────────────────────
+        if "missing" in issues:
+            st.markdown("#### 缺失值")
+            for col, meta in issues["missing"].items():
+                st.markdown(f"**{col}**：缺失 {meta['count']} 行（{meta['pct']}%）")
+                if meta["type"] == "numeric":
+                    opts = ["fill_mean", "fill_median", "fill_zero", "drop_row", "keep"]
+                    labels = {
+                        "fill_mean": "用均值填充",
+                        "fill_median": "用中位数填充",
+                        "fill_zero": "用 0 填充",
+                        "drop_row": "删除含缺失值的行",
+                        "keep": "保留不处理",
+                    }
+                else:
+                    opts = ["fill_mode", "drop_row", "keep"]
+                    labels = {
+                        "fill_mode": "用众数填充",
+                        "drop_row": "删除含缺失值的行",
+                        "keep": "保留不处理",
+                    }
+                action = st.radio(
+                    "处理方式",
+                    opts,
+                    format_func=lambda x: labels[x],
+                    horizontal=True,
+                    key=f"miss_{col}",
+                )
+                actions["missing"][col] = action
+            st.divider()
+
+        # ── 异常值 ──────────────────────────────────────────
+        if "outliers" in issues:
+            st.markdown("#### 异常值（IQR 方法）")
+            for col, meta in issues["outliers"].items():
+                st.markdown(
+                    f"**{col}**：{meta['count']} 个异常值，正常范围 [{meta['lower']:.2f}, {meta['upper']:.2f}]"
+                )
+                action = st.radio(
+                    "处理方式",
+                    ["clip", "drop_row", "keep"],
+                    format_func=lambda x: {
+                        "clip": "截断至边界值",
+                        "drop_row": "删除含异常值的行",
+                        "keep": "保留不处理",
+                    }[x],
+                    horizontal=True,
+                    key=f"out_{col}",
+                )
+                actions["outliers"][col] = action
+            st.divider()
+
+        # ── 应用清洗 ────────────────────────────────────────
+        if st.button("✅ 应用清洗", type="primary"):
+            cleaned_df, log = stat_analyzer.apply_cleaning(df, info, actions)
+            st.session_state["cleaned_df"] = cleaned_df
+            st.session_state["cleaning_log"] = log
+
+        if "cleaned_df" in st.session_state:
+            cleaned_df = st.session_state["cleaned_df"]
+            log = st.session_state.get("cleaning_log", [])
+
+            st.markdown("#### 清洗结果")
+            col_before, col_after = st.columns(2)
+            col_before.metric("清洗前行数", len(df))
+            col_after.metric("清洗后行数", len(cleaned_df), delta=len(cleaned_df) - len(df))
+
+            if log:
+                st.markdown("**执行操作：**")
+                for item in log:
+                    st.markdown(f"- {item}")
+            else:
+                st.info("未执行任何操作（所有选项均为「保留不处理」）。")
+
+            st.markdown("**清洗后数据预览**")
+            st.dataframe(cleaned_df.head(100), width="stretch")
+
+            csv_bytes = cleaned_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                label="📥 下载清洗后的 CSV",
+                data=csv_bytes,
+                file_name=f"{uploaded.name.rsplit('.', 1)[0]}_cleaned.csv",
+                mime="text/csv",
+            )

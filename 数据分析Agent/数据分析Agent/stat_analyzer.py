@@ -65,6 +65,100 @@ def build_stat_summary(df, info):
     return text
 
 
+def detect_issues(df, info):
+    """结构化检测数据质量问题，供清洗 Tab 使用"""
+    issues = {}
+
+    dupes = int(df.duplicated().sum())
+    if dupes > 0:
+        issues["duplicates"] = {"count": dupes}
+
+    if info["missing"]:
+        issues["missing"] = {}
+        for col, cnt in info["missing"].items():
+            pct = info["missing_pct"][col]
+            col_type = "numeric" if col in info["numeric_cols"] else "category"
+            issues["missing"][col] = {"count": cnt, "pct": pct, "type": col_type}
+
+    outliers = {}
+    for col in info["numeric_cols"]:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        n_out = int(((series < lower) | (series > upper)).sum())
+        if n_out > 0:
+            outliers[col] = {"count": n_out, "lower": lower, "upper": upper}
+    if outliers:
+        issues["outliers"] = outliers
+
+    return issues
+
+
+def apply_cleaning(df, info, actions):
+    """根据用户选择的 actions 执行清洗，返回 (cleaned_df, log)"""
+    df = df.copy()
+    log = []
+
+    if actions.get("duplicates") == "drop":
+        before = len(df)
+        df = df.drop_duplicates()
+        removed = before - len(df)
+        if removed > 0:
+            log.append(f"删除重复行 {removed} 行")
+
+    for col, action in actions.get("missing", {}).items():
+        if col not in df.columns or action == "keep":
+            continue
+        n_miss = int(df[col].isnull().sum())
+        if n_miss == 0:
+            continue
+        if action == "drop_row":
+            df = df.dropna(subset=[col])
+            log.append(f"「{col}」删除含缺失值的行（{n_miss} 行）")
+        elif action == "fill_mean" and col in info["numeric_cols"]:
+            val = round(float(df[col].mean()), 4)
+            df[col] = df[col].fillna(val)
+            log.append(f"「{col}」用均值 {val} 填充 {n_miss} 个缺失值")
+        elif action == "fill_median" and col in info["numeric_cols"]:
+            val = round(float(df[col].median()), 4)
+            df[col] = df[col].fillna(val)
+            log.append(f"「{col}」用中位数 {val} 填充 {n_miss} 个缺失值")
+        elif action == "fill_mode":
+            mode_vals = df[col].mode()
+            if len(mode_vals) > 0:
+                df[col] = df[col].fillna(mode_vals[0])
+                log.append(f"「{col}」用众数「{mode_vals[0]}」填充 {n_miss} 个缺失值")
+        elif action == "fill_zero":
+            df[col] = df[col].fillna(0)
+            log.append(f"「{col}」用 0 填充 {n_miss} 个缺失值")
+
+    for col, action in actions.get("outliers", {}).items():
+        if col not in df.columns or action == "keep":
+            continue
+        series = df[col].dropna()
+        q1 = float(series.quantile(0.25))
+        q3 = float(series.quantile(0.75))
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        mask = (df[col] < lower) | (df[col] > upper)
+        n_out = int(mask.sum())
+        if action == "clip":
+            df[col] = df[col].clip(lower=lower, upper=upper)
+            log.append(f"「{col}」将 {n_out} 个异常值截断至 [{lower:.2f}, {upper:.2f}]")
+        elif action == "drop_row":
+            df = df[~mask]
+            log.append(f"「{col}」删除含异常值的行（{n_out} 行）")
+
+    return df, log
+
+
 def build_cleaning_context(df, info):
     """构建用于 AI 生成清洗建议的上下文文本"""
     lines = [f"数据集：{info['rows']} 行 × {info['cols']} 列"]
