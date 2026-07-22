@@ -63,3 +63,42 @@ def build_stat_summary(df, info):
     if len(text) > config.MAX_STAT_CHARS:
         text = text[:config.MAX_STAT_CHARS] + "\n...(摘要已截断)"
     return text
+
+
+def build_cleaning_context(df, info):
+    """构建用于 AI 生成清洗建议的上下文文本"""
+    lines = [f"数据集：{info['rows']} 行 × {info['cols']} 列"]
+
+    dupes = int(df.duplicated().sum())
+    lines.append(f"重复行：{dupes} 行")
+
+    if info["missing"]:
+        for col, cnt in info["missing"].items():
+            pct = info["missing_pct"][col]
+            lines.append(f"缺失值：列「{col}」缺失 {cnt} 行（{pct}%）")
+    else:
+        lines.append("缺失值：无")
+
+    outlier_msgs = []
+    for col in info["numeric_cols"]:
+        series = df[col].dropna()
+        if len(series) == 0:
+            continue
+        q1, q3 = float(series.quantile(0.25)), float(series.quantile(0.75))
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        n_out = int(((series < q1 - 1.5 * iqr) | (series > q3 + 1.5 * iqr)).sum())
+        if n_out > 0:
+            outlier_msgs.append(f"列「{col}」有 {n_out} 个异常值（IQR 方法），范围：{q1 - 1.5*iqr:.2f}～{q3 + 1.5*iqr:.2f}")
+    if outlier_msgs:
+        lines.extend(outlier_msgs)
+    else:
+        lines.append("异常值：数值列未检测到明显异常值")
+
+    for col in info["cat_cols"]:
+        ratio = df[col].nunique() / max(len(df), 1)
+        if ratio > 0.3:
+            lines.append(f"高唯一值：列「{col}」唯一值占比 {ratio:.0%}，疑似 ID 类列，建议确认是否需要")
+
+    return "\n".join(lines)

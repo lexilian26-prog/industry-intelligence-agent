@@ -185,6 +185,41 @@ with tab1:
             })
         st.dataframe(pd.DataFrame(dt_stats).set_index("列名"), width="stretch")
 
+    st.subheader("数据清洗建议")
+    cleaning_key = f"cleaning_{uploaded.name}_{info['rows']}"
+    if col_btn.button("🔄", key="refresh_cleaning", help="重新生成清洗建议"):
+        st.session_state.pop("cleaning_cache_key", None)
+        st.session_state.pop("cleaning_text", None)
+
+    if st.session_state.get("cleaning_cache_key") != cleaning_key:
+        cleaning_ctx = stat_analyzer.build_cleaning_context(df, info)
+        cleaning_prompt = (
+            "以下是一份数据集的质量摘要：\n" + cleaning_ctx +
+            "\n\n请根据上述信息，给出简洁的数据清洗建议。"
+            "只针对实际存在的问题给出建议，没有问题的项不要提及。"
+            "用简短的分点列表呈现，每条建议说明问题是什么、建议如何处理。"
+        )
+        with st.spinner("生成数据清洗建议..."):
+            try:
+                client = ai_interpreter._get_client()
+                import config as _cfg
+                msg = client.messages.create(
+                    model=_cfg.ANTHROPIC_MODEL,
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": cleaning_prompt}],
+                )
+                st.session_state["cleaning_text"] = msg.content[0].text
+                st.session_state["cleaning_cache_key"] = cleaning_key
+            except Exception:
+                st.session_state["cleaning_text"] = ""
+                st.session_state["cleaning_cache_key"] = cleaning_key
+
+    cleaning_text = st.session_state.get("cleaning_text", "")
+    if cleaning_text:
+        st.markdown(cleaning_text)
+    else:
+        st.caption("未发现明显数据质量问题。")
+
 # ══ Tab2：可视化分析 ════════════════════════════════════════
 with tab2:
     col_title2, col_btn2 = st.columns([8, 1])
@@ -277,12 +312,27 @@ with tab2:
 
     _preset_col.caption("快捷主题")
     _btn_cols = _preset_col.columns(len(chart_builder.COLOR_THEMES))
+    # 快捷主题对应的饼图配色方案
+    _THEME_TO_PIE = {
+        "宝蓝": "商务蓝灰",
+        "墨绿": "自然绿棕",
+        "深橙": "暖色系",
+        "钢铁灰": "莫兰迪",
+        "酒红": "高对比",
+        "靛蓝": "冷色系",
+    }
+
     for _i, (_name, _meta) in enumerate(chart_builder.COLOR_THEMES.items()):
         _c = _meta["single"]
         if _btn_cols[_i].button(_name, key=f"theme_{_name}", help=_c):
             st.session_state["_theme_color_val"] = _c
             for _k in _COLOR_KEYS:
                 st.session_state[_k] = _c
+            # 同步饼图配色方案，并清空自定义颜色
+            st.session_state["pie_palette_name"] = _THEME_TO_PIE.get(_name, "商务蓝灰")
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("pie_cc_"):
+                    del st.session_state[_k]
             st.rerun()
 
     figures_for_export = {}  # {标签: fig}
